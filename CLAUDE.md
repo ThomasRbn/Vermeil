@@ -29,6 +29,7 @@ All decisions live in [`docs/adr/`](docs/adr/README.md). Read the relevant ADRs 
 ## Conventions
 
 - Language: TypeScript everywhere. CLI runtime: **Bun**, shipped as a compiled binary (ADR-0018). Planned monorepo with a shared `core` package (format types, ref access) used by the CLI and the web app.
+- npm scope **`@usevermeil`** is reserved: all published packages use it (e.g. `@usevermeil/core`, `@usevermeil/cli`).
 - Git is driven by spawning the `git` binary, not a JS reimplementation.
 - Hooks run on every tool call: keep CLI start-up fast.
 - Code, comments, docs, ADRs and commit messages are written in **English**.

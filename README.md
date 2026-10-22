@@ -52,6 +52,8 @@ Every line carries its **provenance** (AI, human, or mixed) and a **trust level*
 
 The first supported agent is **Claude Code**.
 
+Packages will be published on npm under the **[`@usevermeil`](https://www.npmjs.com/org/usevermeil)** scope.
+
 ## Documentation
 
 - [Architecture Decision Records](docs/adr/README.md): every design decision, with its context and the alternatives considered.
