@@ -1,0 +1,8 @@
+{
+  "name": "vermeil-prototype",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "ulidx": "^2.4.1"
+  }
+}
