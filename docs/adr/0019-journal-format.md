@@ -48,3 +48,16 @@ During the prototype, events also keep the **raw hook input** (`raw` field) to o
 - **Unreachable objects are garbage-collected** (`gc.pruneExpire`, about two weeks by default). Acceptable for the prototype; the real implementation must keep snapshots reachable (e.g. a local, never-pushed ref per session).
 - **Concurrent writes**: each event must be written in a **single** append call. Fine for short lines on a local disk; large payloads need care.
 - **Worktrees**: `.git` can be a file. Whether the journal lives under `git rev-parse --git-dir` (per worktree) or `--git-common-dir` (shared) is still to be decided; snapshots are tied to a specific working tree.
+
+## Prototype findings
+
+Observations from the capture prototype (2026-10-22), to feed the final decision and ADR-0016:
+
+- **Hook payloads.** Every event carries `session_id`, `prompt_id`, `cwd`, `transcript_path`, `permission_mode` and `effort`. The **model is not included** (to be found in the transcript or another hook). Tool events add `tool_name`, `tool_input` and `tool_use_id`; `PostToolUse` adds `tool_response` and `duration_ms`.
+- **`prompt_id` is present on tool events**, so every tool call can be linked to the prompt that triggered it, without generating our own IDs.
+- **`tool_response` for `Edit`** includes `structuredPatch`, `userModified` (possible signal that the user edited the proposed change) and `originalFile` (the **full file content**: raw events can get large).
+- **Writing tools run sequentially**, even when the agent issues them in parallel. Lock contention on the session index is therefore rare; the retry loop stays as a safety net.
+- **`post(N) == pre(N+1)`** when nothing else touched the working tree between two tool calls: a difference reveals a change made outside the agent (ADR-0006).
+- **Concurrent changes are misattributed.** An editor created `.vscode/settings.json` while a `Bash` tool call was running; the snapshot diff attributed it to that tool call. For `Edit`/`Write`, attribution can be restricted to `tool_input.file_path`; for `Bash`, the window remains ambiguous.
+- **Performance** on the Vermeil repository: ~150 ms for the first snapshot of a session (seeding the session index from the user's index), ~50 ms afterwards.
+- **Hooks reload mid-session** and fire in any harness built on the Claude Code engine (verified with an Agent SDK-based app).
