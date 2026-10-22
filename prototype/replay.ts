@@ -1,24 +1,19 @@
-// Throwaway capture prototype (ADR-0019): replays a session journal and shows what each tool call changed.
+// Throwaway capture prototype (ADR-0019): replays a session journal and shows what each tool call
+// changed, and which intent covers it.
 // Usage: bun prototype/replay.ts [session-id] [--patch]
 
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { git, gitDir } from "./git";
-
-type JournalEvent = {
-  id: string;
-  ts: string;
-  type: string;
-  data: Record<string, unknown>;
-  raw: Record<string, unknown>;
-};
+import { coverage, describe, oneLine, readEvents, repoRoot, type JournalEvent } from "./journal";
 
 const cwd = process.cwd();
-const root = realpathSync(git(["rev-parse", "--show-toplevel"], cwd));
+const root = repoRoot(cwd);
 const color = process.stdout.isTTY;
 const dim = (text: string) => (color ? `\x1b[2m${text}\x1b[0m` : text);
 const bold = (text: string) => (color ? `\x1b[1m${text}\x1b[0m` : text);
 const yellow = (text: string) => (color ? `\x1b[33m${text}\x1b[0m` : text);
+const cyan = (text: string) => (color ? `\x1b[36m${text}\x1b[0m` : text);
 
 function latestSession(sessionsDir: string): string {
   const sessions = readdirSync(sessionsDir)
@@ -29,43 +24,7 @@ function latestSession(sessionsDir: string): string {
   return sessions[0]!.name;
 }
 
-// Events are read in file order, which is the order the hooks appended them.
-function readEvents(file: string): JournalEvent[] {
-  const events: JournalEvent[] = [];
-  for (const [index, line] of readFileSync(file, "utf8").split("\n").entries()) {
-    if (!line.trim()) continue;
-    try {
-      events.push(JSON.parse(line));
-    } catch {
-      console.error(yellow(`skipping corrupted line ${index + 1}`));
-    }
-  }
-  return events;
-}
-
 const time = (event: JournalEvent) => event.ts.slice(11, 19);
-const oneLine = (text: string, max = 80) => {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-};
-
-// Paths are shown relative to the repository. Symlinks are resolved on both sides
-// (on macOS, /var and /private/var are the same directory).
-function relativePath(path: string): string {
-  try {
-    return relative(root, join(realpathSync(dirname(path)), basename(path)));
-  } catch {
-    return path; // the directory no longer exists
-  }
-}
-
-// What the tool call was about: the targeted file, or the shell command.
-function describe(event: JournalEvent): string {
-  const input = (event.raw.tool_input ?? {}) as Record<string, unknown>;
-  const file = input.file_path ?? input.notebook_path;
-  if (typeof file === "string") return relativePath(file);
-  return typeof input.command === "string" ? oneLine(input.command) : "";
-}
 
 function printDiff(from: string, to: string, patch: boolean): boolean {
   if (from === to) {
@@ -88,13 +47,14 @@ function main(): void {
   const patch = args.includes("--patch");
   const sessionsDir = join(gitDir(cwd), "vermeil", "journal", "sessions");
   const sessionId = args.find((arg) => !arg.startsWith("--")) ?? latestSession(sessionsDir);
-  const events = readEvents(join(sessionsDir, sessionId, "events.jsonl"));
+  const events = readEvents(join(sessionsDir, sessionId));
+  const covered = coverage(events);
 
   console.log(bold(`Session ${sessionId}`) + dim(` (${events.length} events)`));
 
   const pending = new Map<string, JournalEvent>(); // tool.pre events waiting for their tool.post
   let lastSnapshot: string | undefined; // most recent known state of the working tree
-  const stats = { prompts: 0, toolCalls: 0, changingToolCalls: 0, outsideChanges: 0 };
+  const stats = { prompts: 0, toolCalls: 0, changingToolCalls: 0, outsideChanges: 0, intents: 0, uncovered: 0 };
 
   for (const event of events) {
     switch (event.type) {
@@ -121,13 +81,37 @@ function main(): void {
         const pre = pending.get(toolUseId);
         pending.delete(toolUseId);
         stats.toolCalls++;
-        console.log(`  ● ${event.data.tool} ${dim(time(event))}  ${describe(event)}`);
+        const failed = event.data.failed ? yellow(" (failed)") : "";
+        console.log(`  ● ${event.data.tool}${failed} ${dim(time(event))} ${dim(toolUseId.slice(-8))}  ${describe(root, event)}`);
         if (!pre) {
           console.log(yellow("      no matching tool.pre"));
         } else if (printDiff(String(pre.data.snapshot), snapshot, patch)) {
           stats.changingToolCalls++;
+          const intent = covered.get(toolUseId);
+          if (intent) console.log(cyan(`      → intent: ${intent.data.title}`));
+          else {
+            stats.uncovered++;
+            console.log(yellow("      → no intent"));
+          }
         }
         lastSnapshot = snapshot;
+        break;
+      }
+      case "intent.declare": {
+        stats.intents++;
+        const changes = event.data.changes as string[];
+        console.log(`  ${cyan("◆ intent")} ${dim(time(event))}  "${event.data.title}"`);
+        console.log(dim(`      covers ${changes.map((id) => id.slice(-8)).join(", ")}`));
+        break;
+      }
+      case "stop": {
+        const uncovered = (event.data.uncovered as string[] | undefined) ?? [];
+        const detail = event.data.blocked
+          ? `blocked, intents requested for ${uncovered.length} change(s)`
+          : uncovered.length > 0
+            ? `allowed with ${uncovered.length} uncovered change(s)`
+            : "allowed";
+        console.log(dim(`  ■ stop ${time(event)}  ${detail}`));
         break;
       }
     }
@@ -135,13 +119,14 @@ function main(): void {
 
   // A tool.pre without tool.post: the tool failed, was denied, or the session was interrupted.
   for (const pre of pending.values()) {
-    console.log(yellow(`  ✗ ${pre.data.tool} ${time(pre)} has no tool.post (failed or interrupted): ${describe(pre)}`));
+    console.log(yellow(`  ✗ ${pre.data.tool} ${time(pre)} has no tool.post (failed or interrupted): ${describe(root, pre)}`));
   }
 
   console.log(
     dim(
-      `\nprompts: ${stats.prompts} · tool calls: ${stats.toolCalls} ` +
-        `(with changes: ${stats.changingToolCalls}) · changes outside the agent: ${stats.outsideChanges}`,
+      `\nprompts: ${stats.prompts} · tool calls: ${stats.toolCalls} (with changes: ${stats.changingToolCalls}) · ` +
+        `intents: ${stats.intents} · changes without intent: ${stats.uncovered} · ` +
+        `changes outside the agent: ${stats.outsideChanges}`,
     ),
   );
 }

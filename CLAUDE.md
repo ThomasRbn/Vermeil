@@ -9,9 +9,16 @@ Vermeil helps humans review AI-generated code by checking **whether the code mat
 
 ## Current phase
 
-Design is done; implementation has not started. Next steps:
+Design is done. A throwaway **capture prototype** lives in `prototype/` (see ADR-0019 for its findings):
 
-1. Throwaway **capture prototype**: Claude Code hooks + local journal (event-sourced JSON Lines, ADR-0019) + working-tree snapshots, no shared format yet. Start with `UserPromptSubmit`.
+- `hook.ts`: Claude Code hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`) writing to the journal (event-sourced JSON Lines) with working-tree snapshots; `Stop` blocks until changes of the turn are covered by intents.
+- `intent.ts`: command the agent runs to declare an intent.
+- `replay.ts`: replays a session (`bun prototype/replay.ts [session-id] [--patch]`).
+- Hooks are enabled for this repository in `.claude/settings.local.json` (not committed).
+
+Next steps:
+
+1. Use the prototype on real sessions for 1–2 weeks.
 2. Study **git-ai** (prior art for line-level attribution in Git).
 3. Hand-write realistic intents from real sessions, then finalise the data format (ADR-0016, still *Proposed*).
 
